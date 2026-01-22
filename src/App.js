@@ -1,10 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Camera, Plane, Zap, RefreshCw, Play, Square, Battery, Wifi, AlertCircle, ArrowUp, ArrowDown, RotateCw, RotateCcw, MoveUp, MoveDown } from 'lucide-react';
+import { Camera, Plane, Zap, RefreshCw, Play, Square, Battery, Wifi, ArrowUp, ArrowDown, MoveUp, MoveDown } from 'lucide-react';
 
 function App() {
   const [photo1, setPhoto1] = useState(null);
   const [photo2, setPhoto2] = useState(null);
-  const [comparison, setComparison] = useState('');
+  const [comparisonLlava, setComparisonLlava] = useState('');
+  const [comparisonQwen, setComparisonQwen] = useState('');
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState('Click "Connect to Drone" to begin');
   const [connected, setConnected] = useState(false);
@@ -12,41 +13,69 @@ function App() {
   const [droneStatus, setDroneStatus] = useState(null);
   const videoRef = useRef(null);
   const videoRef2 = useRef(null); // Second video ref for Photo 2 preview
-  const [useMJPEG, setUseMJPEG] = useState(true); // Try MJPEG first
+  const webcamStreamRef = useRef(null); // Webcam MediaStream
+  const [useMJPEG] = useState(true); // Try MJPEG first
   const [cameraSource, setCameraSource] = useState('tello'); // 'tello' or 'webcam'
+  const [playMusic, setPlayMusic] = useState(false); // Control YouTube music playback
 
   // Slider state for flight controls
-  const [altitudeSlider, setAltitudeSlider] = useState(0); // -100 to 100 (down to up)
   const [rotationSlider, setRotationSlider] = useState(0); // -100 to 100 (left to right)
 
-  const SERVER_URL = 'http://localhost:3001';
+  const SERVER_URL = process.env.BACKEND_SERBER_URL || 'http://localhost:50000';
+  const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
 
   const connectDrone = async (source = 'tello') => {
     setLoading(true);
     setStatus(`Connecting to ${source === 'webcam' ? 'webcam' : 'Tello drone'}...`);
 
     try {
-      const response = await fetch(`${SERVER_URL}/api/connect`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ source })
-      });
-
-      const data = await response.json();
-
-      if (data.success) {
-        setConnected(true);
-        setCameraSource(data.source || source);
-        if (source === 'webcam') {
+      if (source === 'webcam') {
+        // Use browser's MediaDevices API directly - no backend needed
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ 
+            video: { 
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+              facingMode: 'user' 
+            } 
+          });
+          
+          webcamStreamRef.current = stream;
+          setConnected(true);
+          setCameraSource('webcam');
           setStatus('✅ Connected to webcam!');
-        } else {
-          setStatus(`✅ Connected to Tello drone!${data.battery ? ` Battery: ${data.battery}%` : ''}`);
+          
+          // Auto-start video stream for webcam
+          await startVideoStream();
+        } catch (error) {
+          if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+            setStatus('❌ Camera permission denied. Please allow camera access.');
+          } else if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
+            setStatus('❌ No camera found. Please connect a camera.');
+          } else {
+            setStatus(`❌ Webcam error: ${error.message}`);
+          }
         }
-        getDroneStatus();
       } else {
-        setStatus(`❌ Connection failed: ${data.error}`);
+        // Connect to Tello via backend
+        const response = await fetch(`${SERVER_URL}/api/connect`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ source })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+          setConnected(true);
+          setCameraSource(data.source || source);
+          setStatus(`✅ Connected to Tello drone!${data.battery ? ` Battery: ${data.battery}%` : ''}`);
+          getDroneStatus();
+        } else {
+          setStatus(`❌ Connection failed: ${data.error}`);
+        }
       }
     } catch (error) {
       setStatus(`❌ Error: ${error.message}. Is the backend server running?`);
@@ -73,30 +102,76 @@ function App() {
     setStatus('Starting video stream...');
     
     try {
-      const response = await fetch(`${SERVER_URL}/api/start-stream`, {
-        method: 'POST'
-      });
-      
-      const data = await response.json();
-      
-      if (data.success) {
+      if (cameraSource === 'webcam') {
+        // Check if stream exists and is active
+        let stream = webcamStreamRef.current;
+        
+        // If stream doesn't exist or tracks are ended, get a new one
+        if (!stream || stream.getTracks().every(track => track.readyState === 'ended')) {
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({ 
+              video: { 
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+                facingMode: 'user' 
+              } 
+            });
+            webcamStreamRef.current = stream;
+          } catch (error) {
+            if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+              setStatus('❌ Camera permission denied. Please allow camera access.');
+            } else if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
+              setStatus('❌ No camera found. Please connect a camera.');
+            } else {
+              setStatus(`❌ Webcam error: ${error.message}`);
+            }
+            return;
+          }
+        }
+        
+        // Set streaming state first so video elements are rendered
         setStreaming(true);
-        setStatus('📹 Video stream active');
         
-        // Wait a bit for stream to initialize
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        // Wait a bit for video elements to be rendered, then attach stream
+        setTimeout(() => {
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+            videoRef.current.play().catch(err => console.error('Video 1 play error:', err));
+          }
+          if (videoRef2.current) {
+            videoRef2.current.srcObject = stream;
+            videoRef2.current.play().catch(err => console.error('Video 2 play error:', err));
+          }
+        }, 100);
         
-        // Set img source to MJPEG stream for both preview areas
-        const videoUrl = `${SERVER_URL}/api/video-feed?t=${Date.now()}`;
-        console.log('Setting MJPEG source:', videoUrl);
-        if (videoRef.current) {
-          videoRef.current.src = videoUrl;
-        }
-        if (videoRef2.current) {
-          videoRef2.current.src = videoUrl;
-        }
+        setStatus('📹 Video stream active (webcam)');
       } else {
-        setStatus(`❌ Failed to start stream: ${data.error}`);
+        // Use Tello backend stream
+        const response = await fetch(`${SERVER_URL}/api/start-stream`, {
+          method: 'POST'
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+          setStreaming(true);
+          setStatus('📹 Video stream active');
+          
+          // Wait a bit for stream to initialize
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          
+          // Set img source to MJPEG stream for both preview areas
+          const videoUrl = `${SERVER_URL}/api/video-feed?t=${Date.now()}`;
+          console.log('Setting MJPEG source:', videoUrl);
+          if (videoRef.current) {
+            videoRef.current.src = videoUrl;
+          }
+          if (videoRef2.current) {
+            videoRef2.current.src = videoUrl;
+          }
+        } else {
+          setStatus(`❌ Failed to start stream: ${data.error}`);
+        }
       }
     } catch (error) {
       setStatus(`❌ Error: ${error.message}`);
@@ -108,20 +183,37 @@ function App() {
 
   const stopVideoStream = async () => {
     try {
-      // Clear video sources when stopping
-      if (videoRef.current) {
-        videoRef.current.src = '';
-      }
-      if (videoRef2.current) {
-        videoRef2.current.src = '';
-      }
+      if (cameraSource === 'webcam') {
+        // Stop webcam stream
+        if (webcamStreamRef.current) {
+          webcamStreamRef.current.getTracks().forEach(track => track.stop());
+          webcamStreamRef.current = null;
+        }
+        if (videoRef.current) {
+          videoRef.current.srcObject = null;
+        }
+        if (videoRef2.current) {
+          videoRef2.current.srcObject = null;
+        }
+        setStreaming(false);
+        setStatus('Video stream stopped');
+      } else {
+        // Stop Tello stream
+        // Clear video sources when stopping
+        if (videoRef.current) {
+          videoRef.current.src = '';
+        }
+        if (videoRef2.current) {
+          videoRef2.current.src = '';
+        }
 
-      await fetch(`${SERVER_URL}/api/stop-stream`, {
-        method: 'POST'
-      });
+        await fetch(`${SERVER_URL}/api/stop-stream`, {
+          method: 'POST'
+        });
 
-      setStreaming(false);
-      setStatus('Video stream stopped');
+        setStreaming(false);
+        setStatus('Video stream stopped');
+      }
     } catch (error) {
       setStatus(`Error stopping stream: ${error.message}`);
     }
@@ -137,20 +229,27 @@ function App() {
         await stopVideoStream();
       }
 
-      // Then disconnect
-      const response = await fetch(`${SERVER_URL}/api/disconnect`, {
-        method: 'POST'
-      });
-
-      const data = await response.json();
-
-      if (data.success) {
+      if (cameraSource === 'webcam') {
+        // Disconnect webcam - already stopped in stopVideoStream
         setConnected(false);
         setCameraSource('tello'); // Reset to default
-        setDroneStatus(null);
         setStatus('✅ Disconnected successfully');
       } else {
-        setStatus(`❌ Disconnect failed: ${data.error}`);
+        // Disconnect Tello via backend
+        const response = await fetch(`${SERVER_URL}/api/disconnect`, {
+          method: 'POST'
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+          setConnected(false);
+          setCameraSource('tello'); // Reset to default
+          setDroneStatus(null);
+          setStatus('✅ Disconnected successfully');
+        } else {
+          setStatus(`❌ Disconnect failed: ${data.error}`);
+        }
       }
     } catch (error) {
       setStatus(`❌ Disconnect error: ${error.message}`);
@@ -164,37 +263,66 @@ function App() {
     setStatus(`📸 Capturing photo ${photoNumber}...`);
     
     try {
-      const filename = `tello_photo_${photoNumber}.jpg`;
-      
-      const response = await fetch(`${SERVER_URL}/api/capture`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ filename })
-      });
-      
-      const data = await response.json();
-      
-      if (data.success) {
-        const photoResponse = await fetch(`${SERVER_URL}/api/photo/${filename}`);
-        const blob = await photoResponse.blob();
+      if (cameraSource === 'webcam') {
+        // Capture from webcam video element directly
+        const videoElement = photoNumber === 1 ? videoRef.current : videoRef2.current;
         
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const dataUrl = reader.result;
-          
-          if (photoNumber === 1) {
-            setPhoto1(dataUrl);
-            setStatus(`✅ Photo 1 captured!`);
-          } else {
-            setPhoto2(dataUrl);
-            setStatus(`✅ Photo 2 captured!`);
-          }
-        };
-        reader.readAsDataURL(blob);
+        if (!videoElement || !videoElement.videoWidth) {
+          setStatus('❌ Video not ready. Please wait for stream to start.');
+          return;
+        }
+
+        // Create canvas to capture frame
+        const canvas = document.createElement('canvas');
+        canvas.width = videoElement.videoWidth;
+        canvas.height = videoElement.videoHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+
+        // Convert to data URL
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+        
+        if (photoNumber === 1) {
+          setPhoto1(dataUrl);
+          setStatus(`✅ Photo 1 captured!`);
+        } else {
+          setPhoto2(dataUrl);
+          setStatus(`✅ Photo 2 captured!`);
+        }
       } else {
-        setStatus(`❌ Capture failed: ${data.error}`);
+        // Capture from Tello via backend
+        const filename = `tello_photo_${photoNumber}.jpg`;
+        
+        const response = await fetch(`${SERVER_URL}/api/capture`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ filename })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+          const photoResponse = await fetch(`${SERVER_URL}/api/photo/${filename}`);
+          const blob = await photoResponse.blob();
+          
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const dataUrl = reader.result;
+            
+            if (photoNumber === 1) {
+              setPhoto1(dataUrl);
+              setStatus(`✅ Photo 1 captured!`);
+            } else {
+              setPhoto2(dataUrl);
+              setStatus(`✅ Photo 2 captured!`);
+            }
+          };
+          reader.readAsDataURL(blob);
+        } else {
+          setStatus(`❌ Capture failed: ${data.error}`);
+        }
       }
     } catch (error) {
       setStatus(`❌ Error: ${error.message}`);
@@ -209,76 +337,208 @@ function App() {
       return;
     }
 
+    // Stop any ongoing speech
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+
+    // Play "Shake It Off" while waiting for model response
+    setPlayMusic(true);
+
     setLoading(true);
-    setStatus('🤖 Analyzing photos with Claude AI...');
-    setComparison('');
+    setStatus('🤖 Analyzing photos with LLaVA and Qwen3-VL models...');
+    setComparisonLlava('');
+    setComparisonQwen('');
 
     try {
       const base64Photo1 = photo1.split(',')[1];
       const base64Photo2 = photo2.split(',')[1];
 
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
+      const prompt = 'Compare these two images for audience engagement. The images are displayed side by side (horizontally). Refer to them as "first image" and "second image", NOT "top" or "bottom". Analyze key differences in facial expression, guesture, composition, lighting, positioning. Which image is more engaging? Respond in less than 50 words, then provide a 10-word summary at the end in a new paragraph.';
+
+      // Helper function to process a model response
+      const processModelResponse = async (response, modelName) => {
+        try {
+          if (response.ok) {
+            const data = await response.json();
+            const text = data.message?.content || data.response || data.content || `No response from ${modelName} model`;
+            return text;
+          } else {
+            const errorData = await response.json().catch(() => ({}));
+            let errorMsg = `Error ${response.status}: ${errorData.error || response.statusText}`;
+            if (response.status === 404) {
+              errorMsg += `. Model "${modelName.toLowerCase()}" may not be installed. Run: ollama pull ${modelName.toLowerCase()}`;
+            }
+            console.error(`${modelName} API error:`, errorData);
+            return errorMsg;
+          }
+        } catch (error) {
+          console.error(`Error processing ${modelName} response:`, error);
+          return `Error processing ${modelName} response: ${error.message}`;
+        }
+      };
+
+      // Helper function to extract summary
+      const extractSummary = (text) => {
+        const summaryMatch = text.match(/[Ss]ummary:\s*(.+?)(?:\.|$)/);
+        if (summaryMatch) {
+          const summaryText = summaryMatch[1].trim();
+          const words = summaryText.split(/\s+/).filter(word => word.length > 0);
+          return words.slice(0, 10).join(' ');
+        }
+        const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 0);
+        if (sentences.length > 0) {
+          const lastSentence = sentences[sentences.length - 1].trim();
+          const words = lastSentence.split(/\s+/).filter(word => word.length > 0);
+          return words.slice(0, 10).join(' ');
+        }
+        const allWords = text.split(/\s+/).filter(word => word.length > 0);
+        if (allWords.length >= 10) {
+          const startIdx = Math.floor((allWords.length - 10) / 2);
+          return allWords.slice(startIdx, startIdx + 10).join(' ');
+        }
+        return allWords.slice(0, 10).join(' ');
+      };
+
+      const speakSummary = (text, modelName) => {
+        return new Promise((resolve) => {
+          const summary = extractSummary(text);
+          if (summary && 'speechSynthesis' in window) {
+            const utterance = new SpeechSynthesisUtterance(`${modelName}: ${summary}`);
+            utterance.rate = 0.9;
+            utterance.pitch = 1;
+            utterance.onend = () => resolve();
+            window.speechSynthesis.speak(utterance);
+          } else {
+            resolve();
+          }
+        });
+      };
+
+      // Start both requests in parallel - they will complete independently
+      setStatus('🤖 Running LLaVA and Qwen3-VL in parallel...');
+      
+      // Helper to add timeout to fetch
+      const fetchWithTimeout = (url, options, timeout = 300000) => { // 5 minute timeout
+        return Promise.race([
+          fetch(url, options),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`Request timeout after ${timeout/1000} seconds`)), timeout)
+          )
+        ]);
+      };
+
+      const llavaPromise = fetchWithTimeout(`${OLLAMA_URL}/api/chat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 1000,
+          model: 'llava',
           messages: [
             {
               role: 'user',
-              content: [
-                {
-                  type: 'image',
-                  source: {
-                    type: 'base64',
-                    media_type: 'image/jpeg',
-                    data: base64Photo1
-                  }
-                },
-                {
-                  type: 'image',
-                  source: {
-                    type: 'base64',
-                    media_type: 'image/jpeg',
-                    data: base64Photo2
-                  }
-                },
-                {
-                  type: 'text',
-                  text: 'Compare these two images. What are the key differences between them? What changes do you notice in position, objects, lighting, or any other aspects? Please be specific and detailed.'
-                }
-              ]
+              content: prompt,
+              images: [base64Photo1, base64Photo2]
             }
-          ]
+          ],
+          stream: false
         })
+      }).then(async (response) => {
+        const text = await processModelResponse(response, 'LLaVA');
+        setComparisonLlava(text);
+        setStatus('✅ LLaVA complete, waiting for Qwen3-VL...');
+        return { text, model: 'LLaVA' };
+      }).catch((error) => {
+        const errorMsg = `LLaVA error: ${error.message}`;
+        console.error('LLaVA error:', error);
+        setComparisonLlava(errorMsg);
+        setStatus('⚠️ LLaVA failed, waiting for Qwen3-VL...');
+        return { text: errorMsg, model: 'LLaVA' };
       });
 
-      if (!response.ok) {
-        throw new Error(`API error: ${response.status}`);
-      }
+      const qwenPromise = fetchWithTimeout(`${OLLAMA_URL}/api/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'qwen3-vl',
+          messages: [
+            {
+              role: 'user',
+              content: prompt,
+              images: [base64Photo1, base64Photo2]
+            }
+          ],
+          stream: false
+        })
+      }).then(async (response) => {
+        const text = await processModelResponse(response, 'Qwen3-VL');
+        setComparisonQwen(text);
+        setStatus('✅ Qwen3-VL complete, waiting for LLaVA...');
+        return { text, model: 'Qwen' };
+      }).catch((error) => {
+        const errorMsg = `Qwen3-VL error: ${error.message}`;
+        console.error('Qwen3-VL error:', error);
+        setComparisonQwen(errorMsg);
+        setStatus('⚠️ Qwen3-VL failed, waiting for LLaVA...');
+        return { text: errorMsg, model: 'Qwen' };
+      });
 
-      const data = await response.json();
-      const resultText = data.content
-        .filter(item => item.type === 'text')
-        .map(item => item.text)
-        .join('\n');
-      
-      setComparison(resultText);
-      setStatus('✅ Comparison complete!');
+      // Wait for both to complete (or fail), then speak summaries sequentially
+      const results = await Promise.allSettled([llavaPromise, qwenPromise]);
+      const processedResults = results.map((result, index) => {
+        if (result.status === 'fulfilled') {
+          return result.value;
+        } else {
+          const modelName = index === 0 ? 'LLaVA' : 'Qwen';
+          const errorMsg = `${modelName} request failed: ${result.reason?.message || 'Unknown error'}`;
+          console.error(`${modelName} promise rejected:`, result.reason);
+          if (index === 0) {
+            setComparisonLlava(errorMsg);
+          } else {
+            setComparisonQwen(errorMsg);
+          }
+          return { text: errorMsg, model: modelName };
+        }
+      });
+
+      // Update status based on results
+      const allComplete = processedResults.every(r => !r.text.includes('error') && !r.text.includes('Error'));
+      setStatus(allComplete ? '✅ Both models complete!' : '⚠️ Some models failed - check results');
+
+      // Stop music when comparison is complete
+      setPlayMusic(false);
+
+      // Speak summaries sequentially to avoid overlap
+      for (const result of processedResults) {
+        if (result.text && !result.text.startsWith('Error') && !result.text.toLowerCase().includes('error')) {
+          await speakSummary(result.text, result.model);
+        }
+      }
     } catch (error) {
-      setStatus(`❌ Comparison error: ${error.message}`);
-      setComparison('Failed to compare photos. Please try again.');
+      setStatus(`❌ Comparison error: ${error.message}. Make sure Ollama is running on ${OLLAMA_URL}`);
+      setComparisonLlava(`Failed to compare photos: ${error.message}`);
+      setComparisonQwen(`Failed to compare photos: ${error.message}`);
+      
+      // Stop music on error too
+      setPlayMusic(false);
     } finally {
       setLoading(false);
     }
   };
 
   const reset = () => {
+    // Stop any ongoing speech
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    
     setPhoto1(null);
     setPhoto2(null);
-    setComparison('');
+    setComparisonLlava('');
+    setComparisonQwen('');
     setStatus(connected ? 'Ready to capture' : 'Click "Connect to Drone" to begin');
   };
 
@@ -392,20 +652,6 @@ function App() {
   };
 
   // Slider handlers with debouncing
-  const handleAltitudeSlider = async (value) => {
-    setAltitudeSlider(value);
-
-    if (value === 0 || loading || cameraSource !== 'tello') return;
-
-    const direction = value > 0 ? 'up' : 'down';
-    const distance = Math.abs(value); // Use the slider value directly as cm (up to 100cm)
-
-    await move(direction, distance);
-
-    // Reset slider to center after movement
-    setTimeout(() => setAltitudeSlider(0), 500);
-  };
-
   const handleRotationSlider = async (value) => {
     setRotationSlider(value);
 
@@ -422,12 +668,28 @@ function App() {
 
   useEffect(() => {
     // Cleanup video on unmount
+    const video1 = videoRef.current;
+    const video2 = videoRef2.current;
+    const stream = webcamStreamRef.current;
     return () => {
-      if (videoRef.current) {
-        videoRef.current.src = '';
+      // Stop webcam stream if active
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
       }
-      if (videoRef2.current) {
-        videoRef2.current.src = '';
+      // Clear video sources
+      if (video1) {
+        if (video1.srcObject) {
+          video1.srcObject = null;
+        } else {
+          video1.src = '';
+        }
+      }
+      if (video2) {
+        if (video2.srcObject) {
+          video2.srcObject = null;
+        } else {
+          video2.src = '';
+        }
       }
     };
   }, []);
@@ -438,6 +700,50 @@ function App() {
       return () => clearInterval(interval);
     }
   }, [connected]);
+
+  // Restore video source when photo is reset and streaming is active
+  useEffect(() => {
+    if (streaming && cameraSource === 'tello' && useMJPEG) {
+      // Small delay to ensure DOM has updated after photo reset
+      const timeoutId = setTimeout(() => {
+        const videoUrl = `${SERVER_URL}/api/video-feed?t=${Date.now()}`;
+        
+        // Restore video source for photo 1 preview if photo1 is null and ref is available
+        if (!photo1 && videoRef.current) {
+          videoRef.current.src = videoUrl;
+        }
+        
+        // Restore video source for photo 2 preview if photo2 is null and ref is available
+        if (!photo2 && videoRef2.current) {
+          videoRef2.current.src = videoUrl;
+        }
+      }, 100);
+      
+      return () => clearTimeout(timeoutId);
+    }
+    // For webcam, video elements are already connected via srcObject, no need to restore
+  }, [streaming, photo1, photo2, useMJPEG, cameraSource]);
+
+  // Ensure webcam stream is attached to video elements when streaming starts
+  useEffect(() => {
+    if (streaming && cameraSource === 'webcam' && webcamStreamRef.current) {
+      const stream = webcamStreamRef.current;
+      
+      // Small delay to ensure video elements are mounted
+      const timeoutId = setTimeout(() => {
+        if (videoRef.current && !videoRef.current.srcObject) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play().catch(err => console.error('Video 1 play error:', err));
+        }
+        if (videoRef2.current && !videoRef2.current.srcObject) {
+          videoRef2.current.srcObject = stream;
+          videoRef2.current.play().catch(err => console.error('Video 2 play error:', err));
+        }
+      }, 100);
+      
+      return () => clearTimeout(timeoutId);
+    }
+  }, [streaming, cameraSource]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-900 via-slate-900 to-purple-900 text-white p-4 md:p-8">
@@ -451,9 +757,6 @@ function App() {
               Analyze Engagements
             </h1>
           </div>
-          {connected && cameraSource === 'webcam' && (
-            <p className="text-slate-400 text-sm">Test Mode - Using Webcam</p>
-          )}
         </div>
 
         {/* Status Bar */}
@@ -642,16 +945,6 @@ function App() {
                 </div>
               </div>
             </div>
-
-            <div className="mt-4 text-xs text-slate-400 bg-slate-900/50 rounded-lg p-3 border border-slate-700">
-              <p className="font-semibold mb-1">⚠️ Flight Tips:</p>
-              <ul className="list-disc list-inside space-y-1">
-                <li>Fly in open space with at least 2m clearance on all sides</li>
-                <li>Keep battery above 20% for safe operation</li>
-                <li>Altitude: 20cm per click • Rotation: Slider for smooth control</li>
-                <li>If drone drifts after takeoff, send a small up/down command to stabilize</li>
-              </ul>
-            </div>
           </div>
         )}
 
@@ -685,7 +978,7 @@ function App() {
               <div className="relative">
                 {photo1 ? (
                   <>
-                    <img src={photo1} alt="Photo 1" className="w-full rounded-lg border-2 border-blue-500/50 shadow-lg" />
+                    <img src={photo1} alt="First capture" className="w-full rounded-lg border-2 border-blue-500/50 shadow-lg" />
                     <button
                       onClick={() => setPhoto1(null)}
                       className="absolute top-2 right-2 bg-red-600 hover:bg-red-700 text-white p-2 rounded-lg shadow-lg transition-all flex items-center gap-1 text-sm"
@@ -698,7 +991,19 @@ function App() {
                   <div className="bg-black rounded-lg overflow-hidden border-2 border-blue-500/30 shadow-lg relative">
                     {streaming ? (
                       <>
-                        {useMJPEG ? (
+                        {cameraSource === 'webcam' ? (
+                          <video
+                            ref={videoRef}
+                            autoPlay
+                            muted
+                            playsInline
+                            className="w-full"
+                            style={{
+                              maxHeight: '400px',
+                              objectFit: 'contain'
+                            }}
+                          />
+                        ) : useMJPEG ? (
                           <img
                             ref={videoRef}
                             alt="Live preview 1"
@@ -743,7 +1048,7 @@ function App() {
               <div className="relative">
                 {photo2 ? (
                   <>
-                    <img src={photo2} alt="Photo 2" className="w-full rounded-lg border-2 border-green-500/50 shadow-lg" />
+                    <img src={photo2} alt="Second capture" className="w-full rounded-lg border-2 border-green-500/50 shadow-lg" />
                     <button
                       onClick={() => setPhoto2(null)}
                       className="absolute top-2 right-2 bg-red-600 hover:bg-red-700 text-white p-2 rounded-lg shadow-lg transition-all flex items-center gap-1 text-sm"
@@ -756,7 +1061,19 @@ function App() {
                   <div className="bg-black rounded-lg overflow-hidden border-2 border-green-500/30 shadow-lg relative">
                     {streaming ? (
                       <>
-                        {useMJPEG ? (
+                        {cameraSource === 'webcam' ? (
+                          <video
+                            ref={videoRef2}
+                            autoPlay
+                            muted
+                            playsInline
+                            className="w-full"
+                            style={{
+                              maxHeight: '400px',
+                              objectFit: 'contain'
+                            }}
+                          />
+                        ) : useMJPEG ? (
                           <img
                             ref={videoRef2}
                             alt="Live preview 2"
@@ -808,7 +1125,7 @@ function App() {
             className="flex-1 py-4 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 disabled:from-slate-700 disabled:to-slate-700 disabled:opacity-50 rounded-xl font-medium text-lg transition-all shadow-xl hover:shadow-purple-500/50 flex items-center justify-center gap-2"
           >
             <Zap className="w-6 h-6" />
-            {loading && comparison === '' ? 'Analyzing...' : 'Compare with AI'}
+            {loading && !comparisonLlava && !comparisonQwen ? 'Analyzing with both models...' : 'Compare with AI'}
           </button>
           <button
             onClick={reset}
@@ -821,16 +1138,50 @@ function App() {
         </div>
 
         {/* Comparison Results */}
-        {comparison && (
-          <div className="bg-gradient-to-br from-purple-900/50 to-pink-900/50 backdrop-blur rounded-xl p-6 border border-purple-500/30 shadow-xl">
-            <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2">
-              <Zap className="w-6 h-6 text-purple-400" />
-              AI Comparison Results
-            </h2>
-            <div className="bg-slate-900/70 rounded-lg p-6 border border-purple-500/20">
-              <p className="text-slate-200 whitespace-pre-wrap leading-relaxed">{comparison}</p>
-            </div>
+        {(comparisonLlava || comparisonQwen) && (
+          <div className="space-y-6">
+            {/* LLaVA Results */}
+            {comparisonLlava && (
+              <div className="bg-gradient-to-br from-blue-900/50 to-cyan-900/50 backdrop-blur rounded-xl p-6 border border-blue-500/30 shadow-xl">
+                <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2">
+                  <Zap className="w-6 h-6 text-blue-400" />
+                  LLaVA Model Analysis
+                  <span className="text-sm font-normal text-blue-300 ml-2">(llava)</span>
+                </h2>
+                <div className="bg-slate-900/70 rounded-lg p-6 border border-blue-500/20">
+                  <p className="text-slate-200 whitespace-pre-wrap leading-relaxed">{comparisonLlava}</p>
+                </div>
+              </div>
+            )}
+
+            {/* Qwen3-VL Results */}
+            {comparisonQwen && (
+              <div className="bg-gradient-to-br from-purple-900/50 to-pink-900/50 backdrop-blur rounded-xl p-6 border border-purple-500/30 shadow-xl">
+                <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2">
+                  <Zap className="w-6 h-6 text-purple-400" />
+                  Qwen3-VL Model Analysis
+                  <span className="text-sm font-normal text-purple-300 ml-2">(qwen3-vl)</span>
+                </h2>
+                <div className="bg-slate-900/70 rounded-lg p-6 border border-purple-500/20">
+                  <p className="text-slate-200 whitespace-pre-wrap leading-relaxed">{comparisonQwen}</p>
+                </div>
+              </div>
+            )}
           </div>
+        )}
+
+        {/* Hidden YouTube player for background music */}
+        {playMusic && (
+          <iframe
+            width="0"
+            height="0"
+            src="https://www.youtube.com/embed/nfWlot6h_JM?autoplay=1&loop=1&playlist=nfWlot6h_JM&mute=0"
+            title="Shake It Off"
+            frameBorder="0"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+            allowFullScreen
+            style={{ display: 'none' }}
+          />
         )}
       </div>
     </div>

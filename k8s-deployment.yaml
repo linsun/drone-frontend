@@ -5,7 +5,7 @@ metadata:
   labels:
     app: tello-frontend
 spec:
-  replicas: 2  # Can have multiple replicas for the frontend
+  replicas: 1  # Can have multiple replicas for the frontend
   selector:
     matchLabels:
       app: tello-frontend
@@ -16,12 +16,17 @@ spec:
     spec:
       containers:
       - name: tello-frontend
-        image: tello-frontend:latest  # You'll need to build this image
-        imagePullPolicy: IfNotPresent
+        image: linsun/tello-frontend:latest  # You'll need to build this image
+        imagePullPolicy: Always
         ports:
         - containerPort: 80
           name: http
           protocol: TCP
+        env:
+        - name: BACKEND_SERBER_URL
+          value: "http://tello-backend:3001"
+        - name: OLLAMA_URL
+          value: "http://host.docker.internal:11434"
         resources:
           requests:
             memory: "128Mi"
