@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Camera, Plane, Zap, RefreshCw, Play, Square, Battery, Wifi, ArrowUp, ArrowDown, MoveUp, MoveDown } from 'lucide-react';
+import { Camera, Plane, Zap, RefreshCw, Play, Square, Battery, Wifi, ArrowUp, ArrowDown, MoveUp, MoveDown, Github, ExternalLink } from 'lucide-react';
 
 function App() {
   const [photo1, setPhoto1] = useState(null);
@@ -17,11 +17,18 @@ function App() {
   const [useMJPEG] = useState(true); // Try MJPEG first
   const [cameraSource, setCameraSource] = useState('tello'); // 'tello' or 'webcam'
   const [playMusic, setPlayMusic] = useState(false); // Control YouTube music playback
+  const [videoFeedKey, setVideoFeedKey] = useState(0); // Bump when returning to live view so feed reloads
 
   // Slider state for flight controls
   const [rotationSlider, setRotationSlider] = useState(0); // -100 to 100 (left to right)
 
-  const SERVER_URL = process.env.BACKEND_SERBER_URL || 'http://localhost:50000';
+  // GitHub PR submit (after analysis)
+  const [githubSubmitting, setGithubSubmitting] = useState(false);
+  const [githubResult, setGithubResult] = useState(null); // { success, prUrl?, error? }
+
+  const SERVER_URL = 'http://localhost:50000';
+  // GitHub PR lives on backend_http_server (port 3001); Tello proxy is 50000.
+  const BACKEND_SERVER_URL = process.env.REACT_APP_BACKEND_SERVER_URL || 'http://localhost:3001';
   const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
 
   const connectDrone = async (source = 'tello') => {
@@ -511,6 +518,9 @@ function App() {
       // Stop music when comparison is complete
       setPlayMusic(false);
 
+      // Submit to GitHub as PR at end of analysis (photo1, photo2 + LLaVA/Qwen responses)
+      submitToGitHub();
+
       // Speak summaries sequentially to avoid overlap
       for (const result of processedResults) {
         if (result.text && !result.text.startsWith('Error') && !result.text.toLowerCase().includes('error')) {
@@ -529,6 +539,42 @@ function App() {
     }
   };
 
+  const GITHUB_REPO = 'linsun/drone-demo';
+
+  const submitToGitHub = async () => {
+    if (!photo1 || !photo2 || (!comparisonLlava && !comparisonQwen)) {
+      setGithubResult({ success: false, error: 'Need both photos and at least one analysis result.' });
+      return;
+    }
+    setGithubSubmitting(true);
+    setGithubResult(null);
+    try {
+      const photo1Base64 = photo1.includes(',') ? photo1.split(',')[1] : photo1;
+      const photo2Base64 = photo2.includes(',') ? photo2.split(',')[1] : photo2;
+      const response = await fetch(`${BACKEND_SERVER_URL}/api/github-pr`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          repo: GITHUB_REPO,
+          photo1Base64,
+          photo2Base64,
+          comparisonLlava: comparisonLlava || '',
+          comparisonQwen: comparisonQwen || '',
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && data.success) {
+        setGithubResult({ success: true, prUrl: data.prUrl });
+      } else {
+        setGithubResult({ success: false, error: data.error || data.message || `HTTP ${response.status}` });
+      }
+    } catch (err) {
+      setGithubResult({ success: false, error: err.message });
+    } finally {
+      setGithubSubmitting(false);
+    }
+  };
+
   const reset = () => {
     // Stop any ongoing speech
     if ('speechSynthesis' in window) {
@@ -539,6 +585,8 @@ function App() {
     setPhoto2(null);
     setComparisonLlava('');
     setComparisonQwen('');
+    setGithubResult(null);
+    setVideoFeedKey((k) => k + 1); // Reload live feed when returning to camera view
     setStatus(connected ? 'Ready to capture' : 'Click "Connect to Drone" to begin');
   };
 
@@ -701,49 +749,40 @@ function App() {
     }
   }, [connected]);
 
-  // Restore video source when photo is reset and streaming is active
+  // Restore video source when photo is reset and streaming is active (Tello MJPEG)
   useEffect(() => {
     if (streaming && cameraSource === 'tello' && useMJPEG) {
-      // Small delay to ensure DOM has updated after photo reset
       const timeoutId = setTimeout(() => {
-        const videoUrl = `${SERVER_URL}/api/video-feed?t=${Date.now()}`;
-        
-        // Restore video source for photo 1 preview if photo1 is null and ref is available
+        const videoUrl = `${SERVER_URL}/api/video-feed?t=${Date.now()}&k=${videoFeedKey}`;
         if (!photo1 && videoRef.current) {
           videoRef.current.src = videoUrl;
         }
-        
-        // Restore video source for photo 2 preview if photo2 is null and ref is available
         if (!photo2 && videoRef2.current) {
           videoRef2.current.src = videoUrl;
         }
       }, 100);
-      
       return () => clearTimeout(timeoutId);
     }
-    // For webcam, video elements are already connected via srcObject, no need to restore
-  }, [streaming, photo1, photo2, useMJPEG, cameraSource]);
+  }, [streaming, photo1, photo2, useMJPEG, cameraSource, videoFeedKey]);
 
-  // Ensure webcam stream is attached to video elements when streaming starts
+  // Ensure webcam stream is attached to video elements when streaming is on or when returning from captured photo
   useEffect(() => {
     if (streaming && cameraSource === 'webcam' && webcamStreamRef.current) {
       const stream = webcamStreamRef.current;
-      
-      // Small delay to ensure video elements are mounted
+      if (stream.getTracks().every((t) => t.readyState === 'ended')) return;
       const timeoutId = setTimeout(() => {
-        if (videoRef.current && !videoRef.current.srcObject) {
+        if (videoRef.current) {
           videoRef.current.srcObject = stream;
-          videoRef.current.play().catch(err => console.error('Video 1 play error:', err));
+          videoRef.current.play().catch((err) => console.error('Video 1 play error:', err));
         }
-        if (videoRef2.current && !videoRef2.current.srcObject) {
+        if (videoRef2.current) {
           videoRef2.current.srcObject = stream;
-          videoRef2.current.play().catch(err => console.error('Video 2 play error:', err));
+          videoRef2.current.play().catch((err) => console.error('Video 2 play error:', err));
         }
       }, 100);
-      
       return () => clearTimeout(timeoutId);
     }
-  }, [streaming, cameraSource]);
+  }, [streaming, cameraSource, photo1, photo2]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-900 via-slate-900 to-purple-900 text-white p-4 md:p-8">
@@ -980,7 +1019,7 @@ function App() {
                   <>
                     <img src={photo1} alt="First capture" className="w-full rounded-lg border-2 border-blue-500/50 shadow-lg" />
                     <button
-                      onClick={() => setPhoto1(null)}
+                      onClick={() => { setPhoto1(null); setVideoFeedKey((k) => k + 1); }}
                       className="absolute top-2 right-2 bg-red-600 hover:bg-red-700 text-white p-2 rounded-lg shadow-lg transition-all flex items-center gap-1 text-sm"
                     >
                       <RefreshCw className="w-4 h-4" />
@@ -1050,7 +1089,7 @@ function App() {
                   <>
                     <img src={photo2} alt="Second capture" className="w-full rounded-lg border-2 border-green-500/50 shadow-lg" />
                     <button
-                      onClick={() => setPhoto2(null)}
+                      onClick={() => { setPhoto2(null); setVideoFeedKey((k) => k + 1); }}
                       className="absolute top-2 right-2 bg-red-600 hover:bg-red-700 text-white p-2 rounded-lg shadow-lg transition-all flex items-center gap-1 text-sm"
                     >
                       <RefreshCw className="w-4 h-4" />
@@ -1167,6 +1206,33 @@ function App() {
                 </div>
               </div>
             )}
+
+            {/* Submit to GitHub */}
+            <div className="bg-slate-800/50 backdrop-blur rounded-xl p-4 border border-slate-700/50 flex flex-wrap items-center gap-4">
+              <button
+                type="button"
+                onClick={submitToGitHub}
+                disabled={githubSubmitting}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white font-medium"
+              >
+                <Github className="w-5 h-5" />
+                {githubSubmitting ? 'Submitting...' : 'Submit to GitHub (PR)'}
+              </button>
+              {githubResult?.success && githubResult.prUrl && (
+                <a
+                  href={githubResult.prUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 text-green-400 hover:text-green-300"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                  Open PR
+                </a>
+              )}
+              {githubResult && !githubResult.success && (
+                <span className="text-red-400 text-sm">{githubResult.error}</span>
+              )}
+            </div>
           </div>
         )}
 

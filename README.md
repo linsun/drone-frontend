@@ -39,6 +39,24 @@ Instead, it will copy all the configuration files and the transitive dependencie
 
 You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
 
+## Backend: GitHub PR endpoint
+
+After LLaVA and Qwen3-VL analysis, the app can submit photo1, photo2, and both model responses to [linsun/drone-demo](https://github.com/linsun/drone-demo/) as a pull request. The backend must expose:
+
+**`POST /api/github-pr`**
+
+- **Request body (JSON):**
+  - `repo` (string): e.g. `"linsun/drone-demo"`
+  - `photo1Base64` (string): base64-encoded image (JPEG)
+  - `photo2Base64` (string): base64-encoded image (JPEG)
+  - `comparisonLlava` (string): LLaVA model response text
+  - `comparisonQwen` (string): Qwen3-VL model response text
+
+- **Success response (200):** `{ "success": true, "prUrl": "https://github.com/linsun/drone-demo/pull/123" }`
+- **Error response:** `{ "success": false, "error": "message" }` (or `message`)
+
+The backend should create a new branch, add `photo1.jpg`, `photo2.jpg`, and an analysis file (e.g. `analysis.md` with both responses), commit, push, and open a PR. It needs a GitHub token (e.g. `GITHUB_TOKEN` env) with repo write access.
+
 ## Learn More
 
 You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
